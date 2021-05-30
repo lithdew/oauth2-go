@@ -76,8 +76,11 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 	if _, registered := ResponseTypes[responseType]; !registered {
 		return fmt.Errorf("unknown response type '%s'", responseType)
 	}
+	if responseType == ResponseTypeToken {
+		return errors.New("only authorization codes and id tokens may be generated")
+	}
 
-	redirectURI := query.Get("redirect_uri") // OPTIONAL.
+	redirectURI := query.Get("redirect_uri") // REQUIRED (OPTIONAL if client has no registered redirect uri's).
 	parsedRedirectURI := (*url.URL)(nil)
 	if redirectURI != "" {
 		var err error
@@ -96,6 +99,8 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 	_ = scope                   // TODO(kenta): handle scopes
 
 	state := query.Get("state") // RECOMMENDED.
+
+	nonce := query.Get("nonce") // OPTIONAL.
 
 	clientID := query.Get("client_id") // REQUIRED.
 	if clientID == "" {
@@ -129,8 +134,9 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 			}
 
 			if !parsedRedirectURI.IsAbs() {
-				return fmt.Errorf("client-regsitered redirect uri '%s' is not absolute", redirectURI)
+				return fmt.Errorf("client-registered redirect uri '%s' is not absolute", redirectURI)
 			}
+
 			break
 		}
 	}
@@ -149,6 +155,9 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 	query.Set("code", code.Value)
 	if state != "" {
 		query.Set("state", state)
+	}
+	if nonce != "" {
+		query.Set("nonce", nonce)
 	}
 	parsedRedirectURI.RawQuery = query.Encode()
 
