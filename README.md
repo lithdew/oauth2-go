@@ -25,3 +25,5 @@ All OAuth 2.0 client secrets are bcrypt-hashed with a cost of 10. The server sup
 through either the HTTP `Authorization` header, or through the request body in the case the endpoint being queried
 supports being queried with url-encoded form data as a request body.
 
+OAuth 2.0 Implicit Flow and Resource Owner Password Credentials Flow are intentionally not going to be supported as they
+are strongly advised against being used by recent IETF RFCs and several many identity providers.
