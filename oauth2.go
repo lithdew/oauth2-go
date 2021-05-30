@@ -107,9 +107,31 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 		return fmt.Errorf("client with id '%s' not registered", clientID)
 	}
 
-	if len(client.AllowedRedirectURIs) > 0 {
+	if len(client.AllowedRedirectURIs) != 1 && parsedRedirectURI == nil {
+		return errors.New("redirect uri must be specified")
+	}
+
+	if len(client.AllowedRedirectURIs) != 0 && parsedRedirectURI != nil {
 		if _, allowed := client.AllowedRedirectURIs[redirectURI]; !allowed {
 			return fmt.Errorf("redirect uri '%s' is not authorized under client id '%s'", redirectURI, clientID)
+		}
+	}
+
+	if parsedRedirectURI == nil {
+		var err error
+
+		for allowedRedirectURI := range client.AllowedRedirectURIs {
+			redirectURI = allowedRedirectURI
+
+			parsedRedirectURI, err = url.Parse(redirectURI)
+			if err != nil {
+				return fmt.Errorf("client-registered allowed redirect uri '%s' is not valid: %w", redirectURI, err)
+			}
+
+			if !parsedRedirectURI.IsAbs() {
+				return fmt.Errorf("client-regsitered redirect uri '%s' is not absolute", redirectURI)
+			}
+			break
 		}
 	}
 
