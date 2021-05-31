@@ -165,7 +165,13 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 	scope := query.Get("scope") // OPTIONAL.
 	_ = scope                   // TODO(kenta): handle scopes
 
-	state := query.Get("state") // RECOMMENDED.
+	state := query.Get("state") // REQUIRED.
+	if state == "" {
+		// The client SHOULD
+		// utilize the "state" request parameter to deliver this value to the
+		// authorization server when making an authorization request.
+		return errors.New("state must be provided")
+	}
 
 	nonce := query.Get("nonce") // OPTIONAL.
 
@@ -260,9 +266,7 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 
 	query = parsedRedirectURI.Query()
 	query.Set("code", code.Value)
-	if state != "" {
-		query.Set("state", state)
-	}
+	query.Set("state", state)
 	if nonce != "" {
 		query.Set("nonce", nonce)
 	}
