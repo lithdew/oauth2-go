@@ -113,6 +113,10 @@ func (s *Server) HandleSubmitRegistrationFlow(ctx context.Context, w http.Respon
 		return errors.New("flow has expired")
 	}
 
+	if flow.CSRFToken != r.PostFormValue("csrf_token") {
+		return errors.New("csrf token is invalid")
+	}
+
 	http.Redirect(w, r, "/", http.StatusFound)
 
 	return nil
