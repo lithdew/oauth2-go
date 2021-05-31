@@ -147,7 +147,7 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 		return errors.New("only authorization codes and id tokens may be generated")
 	}
 
-	redirectURI := query.Get("redirect_uri") // REQUIRED (OPTIONAL if client has no registered redirect uri's).
+	redirectURI := query.Get("redirect_uri") // OPTIONAL.
 	parsedRedirectURI := (*url.URL)(nil)
 	if redirectURI != "" {
 		var err error
@@ -185,6 +185,33 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 		return fmt.Errorf("client '%s' not registered", clientID)
 	}
 
+	if len(client.AllowedRedirectURIs) == 0 {
+		return errors.New("client has no redirect uri's registered")
+	}
+
+	if parsedRedirectURI == nil {
+		var err error
+
+		for allowedRedirectURI := range client.AllowedRedirectURIs {
+			redirectURI = allowedRedirectURI
+
+			parsedRedirectURI, err = url.Parse(redirectURI)
+			if err != nil {
+				return fmt.Errorf("client-registered allowed redirect uri '%s' is not valid: %w", redirectURI, err)
+			}
+
+			if !parsedRedirectURI.IsAbs() {
+				return fmt.Errorf("client-registered redirect uri '%s' is not absolute", redirectURI)
+			}
+
+			break
+		}
+	} else {
+		if _, allowed := client.AllowedRedirectURIs[redirectURI]; !allowed {
+			return fmt.Errorf("redirect uri '%s' is not authorized under client id '%s'", redirectURI, clientID)
+		}
+	}
+
 	codeChallenge := query.Get("code_challenge")
 	codeChallengeMethod := CodeChallengeMethod(query.Get("code_challenge_method"))
 
@@ -214,35 +241,6 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 			if len(hash) != sha256.Size {
 				return errors.New("code challenge is not a sha256 hash")
 			}
-		}
-	}
-
-	if len(client.AllowedRedirectURIs) != 1 && parsedRedirectURI == nil {
-		return errors.New("redirect uri must be specified")
-	}
-
-	if len(client.AllowedRedirectURIs) != 0 && parsedRedirectURI != nil {
-		if _, allowed := client.AllowedRedirectURIs[redirectURI]; !allowed {
-			return fmt.Errorf("redirect uri '%s' is not authorized under client id '%s'", redirectURI, clientID)
-		}
-	}
-
-	if parsedRedirectURI == nil {
-		var err error
-
-		for allowedRedirectURI := range client.AllowedRedirectURIs {
-			redirectURI = allowedRedirectURI
-
-			parsedRedirectURI, err = url.Parse(redirectURI)
-			if err != nil {
-				return fmt.Errorf("client-registered allowed redirect uri '%s' is not valid: %w", redirectURI, err)
-			}
-
-			if !parsedRedirectURI.IsAbs() {
-				return fmt.Errorf("client-registered redirect uri '%s' is not absolute", redirectURI)
-			}
-
-			break
 		}
 	}
 
