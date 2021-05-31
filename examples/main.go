@@ -20,6 +20,7 @@ func main() {
 		Store: oauth2.Store{
 			Clients: map[string]oauth2.Client{
 				"example": {
+					Public:        false,
 					Secret:        string(secret),
 					AllowedScopes: map[string]struct{}{},
 					AllowedRedirectURIs: map[string]struct{}{

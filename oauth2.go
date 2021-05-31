@@ -2,6 +2,8 @@ package oauth2
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"github.com/goccy/go-json"
@@ -46,11 +48,25 @@ const (
 	TokenTypeBearer TokenType = "bearer"
 )
 
+type CodeChallengeMethod string
+
+const (
+	CodeChallengePlain CodeChallengeMethod = "plain"
+	CodeChallengeS256  CodeChallengeMethod = "S256"
+)
+
+var CodeChallengeMethods = map[CodeChallengeMethod]struct{}{
+	CodeChallengePlain: {},
+	CodeChallengeS256:  {},
+}
+
 type AuthorizationCode struct {
-	Value        string
-	ClientID     string
-	RedirectURI  string
-	ExpiresAfter time.Time
+	Value               string
+	ClientID            string
+	RedirectURI         string
+	CodeChallenge       string
+	CodeChallengeMethod CodeChallengeMethod
+	ExpiresAfter        time.Time
 }
 
 type AccessToken struct {
@@ -61,6 +77,7 @@ type AccessToken struct {
 }
 
 type Client struct {
+	Public              bool
 	Secret              string
 	AllowedScopes       map[string]struct{}
 	AllowedRedirectURIs map[string]struct{}
@@ -159,7 +176,39 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 
 	client, found := s.Store.GetClientByID(ctx, clientID)
 	if !found {
-		return fmt.Errorf("client with id '%s' not registered", clientID)
+		return fmt.Errorf("client '%s' not registered", clientID)
+	}
+
+	codeChallenge := query.Get("code_challenge")
+	codeChallengeMethod := CodeChallengeMethod(query.Get("code_challenge_method"))
+
+	if codeChallenge == "" && client.Public { // Force public clients to undergo PKCE.
+		return fmt.Errorf("client '%s' is public and requires all users to submit a code challenge", clientID)
+	}
+
+	if codeChallengeMethod == "" {
+		codeChallengeMethod = CodeChallengePlain
+	} else {
+		if _, valid := CodeChallengeMethods[codeChallengeMethod]; !valid {
+			return fmt.Errorf("unknown code challenge method '%s'", codeChallengeMethod)
+		}
+	}
+
+	if codeChallenge != "" || codeChallengeMethod != CodeChallengePlain {
+		switch codeChallengeMethod {
+		case CodeChallengePlain:
+			if !CodeVerifierRegex.MatchString(codeChallenge) {
+				return errors.New("bad code challenge")
+			}
+		case CodeChallengeS256:
+			hash, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(codeChallenge)
+			if err != nil {
+				return errors.New("code challenge is not base64 url-encoded with no padding")
+			}
+			if len(hash) != sha256.Size {
+				return errors.New("code challenge is not a sha256 hash")
+			}
+		}
 	}
 
 	if len(client.AllowedRedirectURIs) != 1 && parsedRedirectURI == nil {
@@ -197,10 +246,12 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 	}
 
 	code := AuthorizationCode{
-		Value:        value,
-		ClientID:     clientID,
-		RedirectURI:  redirectURI,
-		ExpiresAfter: time.Now().UTC().Add(10 * time.Minute),
+		Value:               value,
+		ClientID:            clientID,
+		RedirectURI:         redirectURI,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: codeChallengeMethod,
+		ExpiresAfter:        time.Now().UTC().Add(10 * time.Minute),
 	}
 
 	if err := s.Store.SaveAuthorizationCode(ctx, code); err != nil {
@@ -247,6 +298,18 @@ func (s *Server) HandleAccessTokenRequest(ctx context.Context, w http.ResponseWr
 
 	if time.Now().After(details.ExpiresAfter) {
 		return errors.New("the authorization code has expired")
+	}
+
+	codeVerifier := r.PostFormValue("code_verifier")
+	switch details.CodeChallengeMethod {
+	case CodeChallengePlain:
+		if codeVerifier != details.CodeChallenge {
+			return errors.New("bad code verifier")
+		}
+	case CodeChallengeS256:
+		if GenerateCodeChallengePKCE(codeVerifier) != details.CodeChallenge {
+			return errors.New("bad code verifier")
+		}
 	}
 
 	redirectURI := r.PostFormValue("redirect_uri")

@@ -7,8 +7,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 )
+
+var CodeVerifierRegex = regexp.MustCompile(`[-._~a-zA-Z0-9]{43,128}`)
 
 func GenerateOpaqueValue(secret []byte) (string, string, string, error) {
 	var val [32]byte
@@ -58,4 +61,32 @@ func VerifyOpaqueValue(secret []byte, opaque string) error {
 	}
 
 	return nil
+}
+
+func GenerateCodeVerifierPKCE() (string, error) {
+	const set = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+	const bitsPerIndex = 7
+	const bitsPerIndexMask = 1<<bitsPerIndex - 1
+
+	var result [128]byte
+
+	for i, j, buf := 0, 0, []byte{}; i < 128; j++ {
+		if j%166 == 0 {
+			buf = make([]byte, 166)
+			if _, err := io.ReadFull(rand.Reader, buf); err != nil {
+				return "", err
+			}
+		}
+		if index := int(buf[j&127] & bitsPerIndexMask); index < len(set) {
+			result[i] = set[index]
+			i++
+		}
+	}
+
+	return string(result[:]), nil
+}
+
+func GenerateCodeChallengePKCE(verifier string) string {
+	hash := sha256.Sum256([]byte(verifier))
+	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(hash[:])
 }
