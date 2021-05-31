@@ -9,10 +9,9 @@ import (
 )
 
 // SanitizeIncomingResponseType validates and returns a validated response type from a user request.
+// It is used in the OAuth 2.0 authorization endpoint.
 func SanitizeIncomingResponseType(responseType ResponseType) (ResponseType, error) {
-	if responseType == "" {
-		responseType = ResponseTypeCode // TODO(kenta): see if it's ok to let there be a default response type
-	} else if _, registered := ResponseTypes[responseType]; !registered {
+	if _, registered := ResponseTypes[responseType]; !registered {
 		return responseType, fmt.Errorf("unknown response type '%s'", responseType)
 	}
 	if responseType == ResponseTypeToken {
@@ -21,7 +20,21 @@ func SanitizeIncomingResponseType(responseType ResponseType) (ResponseType, erro
 	return responseType, nil
 }
 
+// SanitizeIncomingGrantType validates and returns a validated grant type from a user request.
+// It is used in the OAuth 2.0 token endpoint.
+func SanitizeIncomingGrantType(grantType GrantType) (GrantType, error) {
+	if _, valid := GrantTypes[grantType]; !valid {
+		return grantType, errors.New("only grant types 'authorization_code' and 'refresh_token' are supported")
+	}
+	if grantType != GrantTypeAuthorizationCode { // Value MUST be set to "authorization_code".
+		return grantType, fmt.Errorf("expected 'grant_type' to be 'authorization_code', got '%s'", grantType)
+	}
+	return grantType, nil
+}
+
 // SanitizeIncomingRedirectURI parses, validates, and returns a validated redirect URI from a user request.
+// It is used in the OAuth 2.0 authorization endpoint.
+//
 // It checks:
 // 1. Redirect URI is a valid URL.
 // 2. Redirect URI is an absolute URL.
@@ -72,6 +85,9 @@ func SanitizeIncomingRedirectURI(client Client, redirectURI string) (*url.URL, s
 	return parsed, redirectURI, nil
 }
 
+// ValidateIncomingCodeChallengePKCE returns an error if the code challenge method is unknown or not allowed, if the
+// client is a public client and a code challenge hasn't been provided, or if the code challenge is malformed.
+// It is used in the OAuth 2.0 authorization endpoint.
 func ValidateIncomingCodeChallengePKCE(client Client, codeChallenge string, codeChallengeMethod CodeChallengeMethod) error {
 	if codeChallenge == "" && client.Public { // Force public clients to undergo PKCE.
 		return fmt.Errorf("client '%s' is public and requires all users to submit a code challenge", client.ID)

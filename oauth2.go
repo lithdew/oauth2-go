@@ -159,11 +159,6 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 		return err
 	}
 
-	if r.Method == http.MethodGet {
-		http.Redirect(w, r, "/login?login_challenge=abcdef", http.StatusFound)
-		return nil
-	}
-
 	state := query.Get("state") // REQUIRED.
 	if state == "" {
 		return errors.New("state must be provided")
@@ -173,9 +168,13 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 
 	codeChallenge := query.Get("code_challenge")
 	codeChallengeMethod := CodeChallengeMethod(query.Get("code_challenge_method"))
-
 	if err := ValidateIncomingCodeChallengePKCE(client, codeChallenge, codeChallengeMethod); err != nil {
 		return err
+	}
+
+	if r.Method == http.MethodGet {
+		http.Redirect(w, r, "/login?login_challenge=abcdef", http.StatusFound)
+		return nil
 	}
 
 	value, _, _, err := GenerateOpaqueValue(GlobalSecret)
@@ -214,12 +213,9 @@ func (s *Server) HandleAccessTokenRequest(ctx context.Context, w http.ResponseWr
 		return errors.New("only POST method is allowed")
 	}
 
-	grantType := GrantType(r.PostFormValue("grant_type"))
-	if _, valid := GrantTypes[grantType]; !valid {
-		return errors.New("only grant types 'authorization_code' and 'refresh_token' are supported")
-	}
-	if grantType != GrantTypeAuthorizationCode { // REQUIRED.  Value MUST be set to "authorization_code".
-		return fmt.Errorf("expected 'grant_type' to be 'authorization_code', got '%s'", grantType)
+	_, err := SanitizeIncomingGrantType(GrantType(r.PostFormValue("grant_type"))) // REQUIRED.
+	if err != nil {
+		return err
 	}
 
 	code := r.PostFormValue("code")
