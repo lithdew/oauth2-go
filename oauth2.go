@@ -2,14 +2,11 @@ package oauth2
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"github.com/goccy/go-json"
 	"golang.org/x/crypto/bcrypt"
 	"net/http"
-	"net/url"
 	"sync"
 	"time"
 )
@@ -77,6 +74,7 @@ type AccessToken struct {
 }
 
 type Client struct {
+	ID                  string
 	Public              bool
 	Secret              string
 	AllowedScopes       map[string]struct{}
@@ -139,41 +137,12 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 
 	query := r.URL.Query()
 
-	responseType := ResponseType(query.Get("response_type")) // REQUIRED.
-	if _, registered := ResponseTypes[responseType]; !registered {
-		return fmt.Errorf("unknown response type '%s'", responseType)
-	}
-	if responseType == ResponseTypeToken {
-		return errors.New("only authorization codes and id tokens may be generated")
+	_, err := SanitizeIncomingResponseType(ResponseType(query.Get("response_type"))) // REQUIRED.
+	if err != nil {
+		return err
 	}
 
-	redirectURI := query.Get("redirect_uri") // OPTIONAL.
-	parsedRedirectURI := (*url.URL)(nil)
-	if redirectURI != "" {
-		var err error
-
-		parsedRedirectURI, err = url.Parse(redirectURI)
-		if err != nil {
-			return fmt.Errorf("bad redirect uri '%s': %w", redirectURI, err)
-		}
-
-		if !parsedRedirectURI.IsAbs() {
-			return fmt.Errorf("redirect uri '%s' must be absolute", redirectURI)
-		}
-	}
-
-	scope := query.Get("scope") // OPTIONAL.
-	_ = scope                   // TODO(kenta): handle scopes
-
-	state := query.Get("state") // REQUIRED.
-	if state == "" {
-		// The client SHOULD
-		// utilize the "state" request parameter to deliver this value to the
-		// authorization server when making an authorization request.
-		return errors.New("state must be provided")
-	}
-
-	nonce := query.Get("nonce") // OPTIONAL.
+	_ = query.Get("scope") // OPTIONAL. TODO(kenta): handle scopes
 
 	clientID := query.Get("client_id") // REQUIRED.
 	if clientID == "" {
@@ -185,63 +154,28 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 		return fmt.Errorf("client '%s' not registered", clientID)
 	}
 
-	if len(client.AllowedRedirectURIs) == 0 {
-		return errors.New("client has no redirect uri's registered")
+	targetURI, redirectURI, err := SanitizeIncomingRedirectURI(client, query.Get("redirect_uri")) // OPTIONAL.
+	if err != nil {
+		return err
 	}
 
-	if parsedRedirectURI == nil {
-		var err error
-
-		for allowedRedirectURI := range client.AllowedRedirectURIs {
-			redirectURI = allowedRedirectURI
-
-			parsedRedirectURI, err = url.Parse(redirectURI)
-			if err != nil {
-				return fmt.Errorf("client-registered allowed redirect uri '%s' is not valid: %w", redirectURI, err)
-			}
-
-			if !parsedRedirectURI.IsAbs() {
-				return fmt.Errorf("client-registered redirect uri '%s' is not absolute", redirectURI)
-			}
-
-			break
-		}
-	} else {
-		if _, allowed := client.AllowedRedirectURIs[redirectURI]; !allowed {
-			return fmt.Errorf("redirect uri '%s' is not authorized under client id '%s'", redirectURI, clientID)
-		}
+	if r.Method == http.MethodGet {
+		http.Redirect(w, r, "/login?login_challenge=abcdef", http.StatusFound)
+		return nil
 	}
+
+	state := query.Get("state") // REQUIRED.
+	if state == "" {
+		return errors.New("state must be provided")
+	}
+
+	nonce := query.Get("nonce") // OPTIONAL.
 
 	codeChallenge := query.Get("code_challenge")
 	codeChallengeMethod := CodeChallengeMethod(query.Get("code_challenge_method"))
 
-	if codeChallenge == "" && client.Public { // Force public clients to undergo PKCE.
-		return fmt.Errorf("client '%s' is public and requires all users to submit a code challenge", clientID)
-	}
-
-	if codeChallengeMethod == "" {
-		codeChallengeMethod = CodeChallengePlain
-	} else {
-		if _, valid := CodeChallengeMethods[codeChallengeMethod]; !valid {
-			return fmt.Errorf("unknown code challenge method '%s'", codeChallengeMethod)
-		}
-	}
-
-	if codeChallenge != "" || codeChallengeMethod != CodeChallengePlain {
-		switch codeChallengeMethod {
-		case CodeChallengePlain:
-			if !CodeVerifierRegex.MatchString(codeChallenge) {
-				return errors.New("bad code challenge")
-			}
-		case CodeChallengeS256:
-			hash, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(codeChallenge)
-			if err != nil {
-				return errors.New("code challenge is not base64 url-encoded with no padding")
-			}
-			if len(hash) != sha256.Size {
-				return errors.New("code challenge is not a sha256 hash")
-			}
-		}
+	if err := ValidateIncomingCodeChallengePKCE(client, codeChallenge, codeChallengeMethod); err != nil {
+		return err
 	}
 
 	value, _, _, err := GenerateOpaqueValue(GlobalSecret)
@@ -262,15 +196,15 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 		return fmt.Errorf("failed to save authorization code: %w", err)
 	}
 
-	query = parsedRedirectURI.Query()
+	query = targetURI.Query()
 	query.Set("code", code.Value)
 	query.Set("state", state)
 	if nonce != "" {
 		query.Set("nonce", nonce)
 	}
-	parsedRedirectURI.RawQuery = query.Encode()
+	targetURI.RawQuery = query.Encode()
 
-	http.Redirect(w, r, parsedRedirectURI.String(), http.StatusFound)
+	http.Redirect(w, r, targetURI.String(), http.StatusFound)
 
 	return nil
 }
