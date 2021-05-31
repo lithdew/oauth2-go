@@ -320,6 +320,13 @@ func (s *Server) HandleAccessTokenRequest(ctx context.Context, w http.ResponseWr
 	clientID, clientSecret, ok := r.BasicAuth()
 	if !ok {
 		clientID, clientSecret = r.PostFormValue("client_id"), r.PostFormValue("client_secret")
+	} else {
+		if _, exists := r.PostForm["client_id"]; exists {
+			return errors.New("cannot specify multiple client authentication methods")
+		}
+		if _, exists := r.PostForm["client_secret"]; exists {
+			return errors.New("cannot specify multiple client authentication methods")
+		}
 	}
 
 	if details.ClientID != clientID {
@@ -331,8 +338,10 @@ func (s *Server) HandleAccessTokenRequest(ctx context.Context, w http.ResponseWr
 		return fmt.Errorf("unknown client_id '%s'", clientID)
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(client.Secret), []byte(clientSecret)); err != nil {
-		return fmt.Errorf("client authentication failed: %w", err)
+	if client.Secret != "" {
+		if err := bcrypt.CompareHashAndPassword([]byte(client.Secret), []byte(clientSecret)); err != nil {
+			return fmt.Errorf("client authentication failed: %w", err)
+		}
 	}
 
 	value, _, _, err := GenerateOpaqueValue(GlobalSecret)
