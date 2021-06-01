@@ -23,7 +23,7 @@ func check2(_ interface{}, err error) { check(err) }
 func pluck(a interface{}, err error) interface{} { check(err); return a }
 
 var loginTemplate = template.Must(template.New("login").Parse(`
-<form method="post" action="/login">
+<form method="post" action="/login/submit">
 	<input type="hidden" name="csrf_token" value="{{ .csrf_token }}" />
 	<input type="email" id="email" name="email" placeholder="hello@example.com" />
 	<input type="password" id="password" name="password" />
@@ -57,6 +57,7 @@ You have {{ .attempts_left }} attempt(s) left. A new code will be generated if a
 
 func main() {
 	server := oauth2.Server{
+		LoginURL:        *pluck(url.Parse("http://localhost:8080/login")).(*url.URL),
 		RegistrationURL: *pluck(url.Parse("http://localhost:8080/register")).(*url.URL),
 		VerificationURL: *pluck(url.Parse("http://localhost:8080/verify")).(*url.URL),
 		Store: oauth2.Store{
@@ -64,6 +65,7 @@ func main() {
 				"example": {
 					ID:            "example",
 					Public:        false,
+					ThirdParty:    false,
 					Secret:        string(pluck(bcrypt.GenerateFromPassword([]byte("foobar"), bcrypt.DefaultCost)).([]byte)),
 					AllowedScopes: map[string]struct{}{},
 					AllowedRedirectURIs: map[string]struct{}{
@@ -75,6 +77,7 @@ func main() {
 			IssuedAuthorizationCodes: map[string]oauth2.AuthorizationCode{},
 			IssuedAccessTokens:       map[string]oauth2.AccessToken{},
 
+			LoginFlows:        map[string]oauth2.LoginFlow{},
 			VerificationFlows: map[string]oauth2.VerificationFlow{},
 			RegistrationFlows: map[string]oauth2.RegistrationFlow{},
 
@@ -87,13 +90,12 @@ func main() {
 
 	csrf := func(h http.Handler) http.Handler {
 		surfing := nosurf.New(h)
-
 		surfing.SetBaseCookie(http.Cookie{
 			Path:     "/",
 			HttpOnly: true,
 			MaxAge:   nosurf.MaxAge,
-			Secure:   true,
-			SameSite: http.SameSiteLaxMode,
+			//Secure:   true,
+			//SameSite: http.SameSiteLaxMode,
 		})
 		return surfing
 	}
@@ -123,12 +125,32 @@ func main() {
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) { check2(w.Write([]byte("Hello world."))) })
 
-	r.Get("/login", func(w http.ResponseWriter, r *http.Request) {
+	r.With(csrf).Get("/login", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("flow") == "" {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+
 		params := map[string]string{"csrf_token": nosurf.Token(r)}
 
 		w.Header().Set("Content-Type", "text/html")
 		if err := loginTemplate.Execute(w, params); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+
+	r.With(csrf).Post("/login/submit", func(w http.ResponseWriter, r *http.Request) {
+		if err := server.HandleSubmitLoginFlow(r.Context(), w, r); err != nil {
+			referrer, parseErr := url.Parse(r.Referer())
+			if parseErr != nil {
+				http.Error(w, parseErr.Error(), http.StatusBadRequest)
+				return
+			}
+			query := referrer.Query()
+			query.Set("error", err.Error())
+			referrer.RawQuery = query.Encode()
+			http.Redirect(w, r, referrer.String(), http.StatusFound)
 			return
 		}
 	})

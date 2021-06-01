@@ -63,6 +63,17 @@ var CodeChallengeMethods = map[CodeChallengeMethod]struct{}{
 	CodeChallengeS256:  {},
 }
 
+type LoginFlow struct {
+	ID                string     `json:"id"`
+	RequestedScope    string     `json:"requested_scope"`
+	RequestedAudience string     `json:"requested_audience"`
+	ClientID          string     `json:"client_id"`
+	RequestURL        string     `json:"request_url"`
+	RequestedAt       time.Time  `json:"requested_at"`
+	RememberUntil     *time.Time `json:"remember_for"`
+	AuthenticatedAt   *time.Time `json:"authenticated_at"`
+}
+
 type RegistrationFlow struct {
 	ID         string    `json:"id"`
 	RequestURL string    `json:"request_url"`
@@ -113,6 +124,7 @@ type Store struct {
 	IssuedAuthorizationCodes map[string]AuthorizationCode
 	IssuedAccessTokens       map[string]AccessToken
 
+	LoginFlows        map[string]LoginFlow
 	RegistrationFlows map[string]RegistrationFlow
 	VerificationFlows map[string]VerificationFlow
 
@@ -155,6 +167,42 @@ func (s *Store) SaveAccessToken(_ context.Context, token AccessToken) error {
 	defer s.mu.Unlock()
 
 	s.IssuedAccessTokens[token.Value] = token
+	return nil
+}
+
+func (s *Store) CreateLoginFlow(_ context.Context, flow LoginFlow) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.LoginFlows[flow.ID]; exists {
+		return errors.New("login flow already exists")
+	}
+	s.LoginFlows[flow.ID] = flow
+	return nil
+}
+
+func (s *Store) GetLoginFlow(_ context.Context, flowID string) (LoginFlow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	flow, exists := s.LoginFlows[flowID]
+	if !exists {
+		return flow, errors.New("login flow not found")
+	}
+
+	return flow, nil
+}
+
+func (s *Store) UpdateLoginFlow(_ context.Context, flow LoginFlow) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, exists := s.LoginFlows[flow.ID]
+	if !exists {
+		return errors.New("login flow not found")
+	}
+	s.LoginFlows[flow.ID] = flow
+
 	return nil
 }
 
@@ -222,21 +270,21 @@ func (s *Store) CreateVerifiableAddress(_ context.Context, address VerifiableAdd
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, found := s.VerifiableAddresses[address.ID]
+	_, found := s.VerifiableAddresses[address.Value]
 	if found {
 		return errors.New("verifiable address already exists ")
 	}
 
-	s.VerifiableAddresses[address.ID] = address
+	s.VerifiableAddresses[address.Value] = address
 
 	return nil
 }
 
-func (s *Store) GetVerifiableAddress(_ context.Context, addressID string) (VerifiableAddress, error) {
+func (s *Store) GetVerifiableAddress(_ context.Context, addressValue string) (VerifiableAddress, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	address, found := s.VerifiableAddresses[addressID]
+	address, found := s.VerifiableAddresses[addressValue]
 	if !found {
 		return address, errors.New("verifiable address not found")
 	}
@@ -248,11 +296,11 @@ func (s *Store) UpdateVerifiableAddress(_ context.Context, address VerifiableAdd
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, found := s.VerifiableAddresses[address.ID]
+	_, found := s.VerifiableAddresses[address.Value]
 	if !found {
 		return errors.New("verifiable address not found")
 	}
-	s.VerifiableAddresses[address.ID] = address
+	s.VerifiableAddresses[address.Value] = address
 
 	return nil
 }
@@ -265,17 +313,26 @@ func (s *Store) CreateIdentity(_ context.Context, identity Identity) error {
 	return nil
 }
 
+func (s *Store) GetIdentity(_ context.Context, identityID string) (Identity, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	identity, exists := s.Identities[identityID]
+	if !exists {
+		return identity, errors.New("identity not found")
+	}
+
+	return identity, nil
+}
+
 type Server struct {
+	LoginURL        url.URL
 	RegistrationURL url.URL
 	VerificationURL url.URL
 	Store           Store
 }
 
 func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		return errors.New("only GET and POST methods are allowed")
-	}
-
 	query := r.URL.Query()
 
 	_, err := SanitizeIncomingResponseType(ResponseType(query.Get("response_type"))) // REQUIRED.
@@ -283,7 +340,8 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 		return err
 	}
 
-	_ = query.Get("scope") // OPTIONAL. TODO(kenta): handle scopes
+	scope := query.Get("scope")       // OPTIONAL. TODO(kenta): handle scopes
+	audience := query.Get("audience") // OPTIONAL. TODO(kenta): handle audience
 
 	clientID := query.Get("client_id") // REQUIRED.
 	if clientID == "" {
@@ -313,8 +371,30 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 		return err
 	}
 
-	if r.Method == http.MethodGet {
-		http.Redirect(w, r, "/login?login_challenge=abcdef", http.StatusFound)
+	flow, err := s.Store.GetLoginFlow(ctx, query.Get("flow"))
+	if err != nil {
+		flow := LoginFlow{
+			ID:                ksuid.New().String(),
+			RequestedScope:    scope,
+			RequestedAudience: audience,
+			ClientID:          clientID,
+			RequestURL:        r.URL.String(),
+			RequestedAt:       time.Now(),
+			RememberUntil:     nil,
+			AuthenticatedAt:   nil,
+		}
+
+		return s.HandleNewLoginFlow(flow, ctx, w, r)
+	}
+
+	if flow.AuthenticatedAt == nil {
+		redirectTo := s.LoginURL
+		query := redirectTo.Query()
+		query.Set("flow", flow.ID)
+		redirectTo.RawQuery = query.Encode()
+
+		http.Redirect(w, r, redirectTo.String(), http.StatusFound)
+
 		return nil
 	}
 
@@ -350,10 +430,6 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 }
 
 func (s *Server) HandleAccessTokenRequest(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-	if r.Method != http.MethodPost {
-		return errors.New("only POST method is allowed")
-	}
-
 	_, err := SanitizeIncomingGrantType(GrantType(r.PostFormValue("grant_type"))) // REQUIRED.
 	if err != nil {
 		return err
@@ -394,8 +470,8 @@ func (s *Server) HandleAccessTokenRequest(ctx context.Context, w http.ResponseWr
 	if !ok {
 		clientID, clientSecret = r.PostFormValue("client_id"), r.PostFormValue("client_secret")
 	} else {
-		if _, exists := r.PostForm["client_id"]; exists {
-			return errors.New("cannot specify multiple client authentication methods")
+		if otherClientID := r.PostFormValue("client_id"); otherClientID != "" && clientID != otherClientID {
+			return errors.New("mismatch in client_id in http header and post body")
 		}
 		if _, exists := r.PostForm["client_secret"]; exists {
 			return errors.New("cannot specify multiple client authentication methods")
@@ -491,29 +567,100 @@ type Credentials struct {
 	Details     json.RawMessage
 }
 
-type Identity struct {
-	ID                  string                          `json:"id"`
-	Credentials         map[CredentialsType]Credentials `json:"credentials"`
-	Traits              json.RawMessage                 `json:"traits"`
-	State               IdentityState                   `json:"state"`
-	VerifiableAddresses []VerifiableAddress             `json:"verifiable_addresses"`
+type PasswordCredentials struct {
+	Hash string `json:"hash"`
+	Salt string `json:"salt"`
 }
 
-func (i Identity) IsVerified() bool {
-	for _, address := range i.VerifiableAddresses {
-		if address.Verified == VerifiableAddressStatusCompleted {
-			return true
-		}
-	}
-	return false
+type Identity struct {
+	ID          string                          `json:"id"`
+	Credentials map[CredentialsType]Credentials `json:"credentials"`
+	Traits      json.RawMessage                 `json:"traits"`
+	State       IdentityState                   `json:"state"`
 }
 
 type VerifiableAddress struct {
-	ID         string
+	Value      string
 	IdentityID string
 	Verified   VerifiableAddressStatus
-	Value      string
 	VerifiedAt time.Time
+}
+
+func (s *Server) HandleNewLoginFlow(flow LoginFlow, ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+	if err := s.Store.CreateLoginFlow(ctx, flow); err != nil {
+		return err
+	}
+
+	redirectTo := s.LoginURL
+	query := redirectTo.Query()
+	query.Set("flow", flow.ID)
+	redirectTo.RawQuery = query.Encode()
+
+	http.Redirect(w, r, redirectTo.String(), http.StatusFound)
+
+	return nil
+}
+
+func (s *Server) HandleSubmitLoginFlow(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+	referrer, err := url.Parse(r.Referer())
+	if err != nil {
+		return errors.New("bad referrer")
+	}
+
+	flow, err := s.Store.GetLoginFlow(ctx, referrer.Query().Get("flow"))
+	if err != nil {
+		return err
+	}
+
+	email := r.PostFormValue("email")
+	password := r.PostFormValue("password")
+	remember := r.PostFormValue("remember") != ""
+
+	address, err := s.Store.GetVerifiableAddress(ctx, email)
+	if err != nil {
+		return errors.New("no accounts could be found with those credentials")
+	}
+
+	identity, err := s.Store.GetIdentity(ctx, address.IdentityID)
+	if err != nil {
+		return errors.New("no accounts could be found with those credentials")
+	}
+
+	credentials, exists := identity.Credentials[CredentialsTypePassword]
+	if !exists {
+		return errors.New("no accounts could be found with those credentials")
+	}
+
+	var details PasswordCredentials
+	if err := json.Unmarshal(credentials.Details, &details); err != nil {
+		return fmt.Errorf("malformed identity password credentials: %w", err)
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(details.Hash), append([]byte(password), []byte(details.Salt)...)); err != nil {
+		return fmt.Errorf("incorrect password: %w", err)
+	}
+
+	flow.AuthenticatedAt = func(t time.Time) *time.Time { return &t }(time.Now())
+	if remember {
+		flow.RememberUntil = func(t time.Time) *time.Time { return &t }(flow.AuthenticatedAt.Add(6 * time.Hour))
+	}
+
+	redirectTo, err := url.Parse(flow.RequestURL)
+	if err != nil {
+		return fmt.Errorf("bad redirect url: %w", err)
+	}
+
+	if err := s.Store.UpdateLoginFlow(ctx, flow); err != nil {
+		return err
+	}
+
+	query := redirectTo.Query()
+	query.Set("flow", flow.ID)
+	redirectTo.RawQuery = query.Encode()
+
+	http.Redirect(w, r, redirectTo.String(), http.StatusFound)
+
+	return nil
 }
 
 func (s *Server) HandleNewRegistrationFlow(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
@@ -557,21 +704,21 @@ func (s *Server) HandleSubmitRegistrationFlow(ctx context.Context, w http.Respon
 	}
 
 	email := r.PostFormValue("email")
+	if _, err := s.Store.GetVerifiableAddress(ctx, email); err == nil {
+		return errors.New("email already used")
+	}
 
 	password := r.PostFormValue("password")
-	salt := ksuid.New().Bytes()
+	salt := ksuid.New().String()
 
 	hash, err := bcrypt.GenerateFromPassword(append([]byte(password), salt...), bcrypt.DefaultCost)
 	if err != nil {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	details, err := json.Marshal(struct {
-		Hash string `json:"hash"`
-		Salt string `json:"salt"`
-	}{
+	details, err := json.Marshal(PasswordCredentials{
 		Hash: string(hash),
-		Salt: string(salt),
+		Salt: salt,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal password details: %w", err)
@@ -592,14 +739,11 @@ func (s *Server) HandleSubmitRegistrationFlow(ctx context.Context, w http.Respon
 	}
 
 	address := VerifiableAddress{
-		ID:         ksuid.New().String(),
 		IdentityID: identity.ID,
 		Verified:   VerifiableAddressStatusPending,
 		Value:      email,
 		VerifiedAt: time.Time{},
 	}
-
-	identity.VerifiableAddresses = append(identity.VerifiableAddresses, address)
 
 	if err := s.Store.CreateIdentity(ctx, identity); err != nil {
 		return fmt.Errorf("failed to create identity: %w", err)
@@ -613,7 +757,7 @@ func (s *Server) HandleSubmitRegistrationFlow(ctx context.Context, w http.Respon
 	// to have been created until the user has passed verification. Start the
 	// verification flow now.
 
-	return s.HandleNewVerificationFlow(address.ID, ctx, w, r)
+	return s.HandleNewVerificationFlow(address.Value, ctx, w, r)
 }
 
 func (s *Server) HandleNewVerificationFlow(addressID string, ctx context.Context, w http.ResponseWriter, r *http.Request) error {
