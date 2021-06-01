@@ -1,12 +1,9 @@
 package main
 
 import (
-	"github.com/goccy/go-json"
 	"github.com/lithdew/oauth2-go"
-	"github.com/lithdew/oauth2-go/auth"
 	"golang.org/x/crypto/bcrypt"
 	"html/template"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 )
@@ -24,34 +21,40 @@ func pluck(a interface{}, err error) interface{} { check(err); return a }
 var loginTemplate = template.Must(template.New("login").Parse(`
 <form method="post" action="/login">
 	<input type="hidden" name="challenge" value="{{ .Challenge }}" />
-	<input type="text" id="username" name="username" placeholder="kenta" />
+	<input type="email" id="email" name="email" placeholder="hello@example.com" />
 	<input type="password" id="password" name="password" />
 
 	<input type="checkbox" id="remember" name="remember" value="1" />
 	<label for="remember">Remember me</label>
 
 	<input type="submit" id="submit" name="submit" value="Login" />
-</form>
-
-<script type="text/javascript">
-</script>`,
+</form>`,
 ))
 
 var registerTemplate = template.Must(template.New("register").Parse(`
-<form method="post" action="/auth/register/submit?flow={{ .ID }}">
+<form method="post" action="/register/submit">
 	<input type="hidden" name="csrf_token" value="{{ .CSRFToken }}" />
-	<input type="text" id="username" name="username" placeholder="kenta" />
+	<input type="email" id="email" name="email" placeholder="hello@example.com" />
 	<input type="password" id="password" name="password" />
 
 	<input type="submit" id="submit" name="submit" value="Register" />
-</form>
-
-<script type="text/javascript">
-</script>`,
+</form>`,
 ))
 
+var verifyTemplate = template.Must(template.New("verify").Parse(`
+You have {{.AttemptsLeft}} attempt(s) left. A new code will be generated if all attempts failed.
+<form method="post" action="/verify/submit">
+	<input type="hidden" name="csrf_token" value="{{ .CSRFToken }}" />
+	<input type="text" id="code" name="code" placeholder="0000" />
+	<input type="submit" id="submit" name="submit" value="Verify" />
+	<input type="submit" id="refresh" name="refresh" value="Resend Verification Code" />
+</form>
+`))
+
 func main() {
-	authorization := oauth2.Server{
+	server := oauth2.Server{
+		RegistrationURL: *pluck(url.Parse("http://localhost:8080/register")).(*url.URL),
+		VerificationURL: *pluck(url.Parse("http://localhost:8080/verify")).(*url.URL),
 		Store: oauth2.Store{
 			Clients: map[string]oauth2.Client{
 				"example": {
@@ -64,29 +67,29 @@ func main() {
 					},
 				},
 			},
+
 			IssuedAuthorizationCodes: map[string]oauth2.AuthorizationCode{},
 			IssuedAccessTokens:       map[string]oauth2.AccessToken{},
-		},
-	}
 
-	authentication := auth.Server{
-		RegistrationURL: *pluck(url.Parse("http://localhost:8080/register")).(*url.URL),
-		Store: auth.Store{
-			RegistrationFlows: map[string]auth.RegistrationFlow{},
+			VerificationFlows: map[string]oauth2.VerificationFlow{},
+			RegistrationFlows: map[string]oauth2.RegistrationFlow{},
+
+			Identities:          map[string]oauth2.Identity{},
+			VerifiableAddresses: map[string]oauth2.VerifiableAddress{},
 		},
 	}
 
 	http.HandleFunc("/oauth2/callback", func(w http.ResponseWriter, r *http.Request) { check(r.Write(w)) })
 
 	http.HandleFunc("/oauth2/auth", func(w http.ResponseWriter, r *http.Request) {
-		if err := authorization.HandleAuthorizationRequest(r.Context(), w, r); err != nil {
+		if err := server.HandleAuthorizationRequest(r.Context(), w, r); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	})
 
 	http.HandleFunc("/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
-		if err := authorization.HandleAccessTokenRequest(r.Context(), w, r); err != nil {
+		if err := server.HandleAccessTokenRequest(r.Context(), w, r); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -107,26 +110,16 @@ func main() {
 	http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("flow")
 		if id == "" {
-			http.Redirect(w, r, "/auth/register/browser", http.StatusFound)
+			if err := server.HandleNewRegistrationFlow(r.Context(), w, r); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			return
 		}
 
-		res, err := http.Get("http://localhost:8080/auth/register?flow=" + id)
+		flow, err := server.Store.GetRegistrationFlow(r.Context(), id)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer res.Body.Close()
-
-		body, err := ioutil.ReadAll(res.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		var flow auth.RegistrationFlow
-		if err := json.Unmarshal(body, &flow); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
@@ -137,23 +130,47 @@ func main() {
 		}
 	})
 
-	http.HandleFunc("/auth/register/browser", func(w http.ResponseWriter, r *http.Request) {
-		if err := authentication.HandleNewRegistrationFlow(r.Context(), w, r); err != nil {
+	http.HandleFunc("/register/submit", func(w http.ResponseWriter, r *http.Request) {
+		if err := server.HandleSubmitRegistrationFlow(r.Context(), w, r); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	})
 
-	http.HandleFunc("/auth/register", func(w http.ResponseWriter, r *http.Request) {
-		if err := authentication.HandleGetRegistrationFlow(r.Context(), w, r); err != nil {
+	http.HandleFunc("/verify", func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Query().Get("flow")
+		if id == "" {
+			http.Error(w, "verification flow id must be specified", http.StatusBadRequest)
+			return
+		}
+
+		flow, err := server.Store.GetVerificationFlow(r.Context(), id)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		address, err := server.Store.GetVerifiableAddress(r.Context(), flow.AddressID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if address.Verified == oauth2.VerifiableAddressStatusCompleted {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/html")
+		if err := verifyTemplate.Execute(w, flow); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	})
 
-	http.HandleFunc("/auth/register/submit", func(w http.ResponseWriter, r *http.Request) {
-		if err := authentication.HandleSubmitRegistrationFlow(r.Context(), w, r); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+	http.HandleFunc("/verify/submit", func(w http.ResponseWriter, r *http.Request) {
+		if err := server.HandleSubmitVerificationFlow(r.Context(), w, r); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	})
