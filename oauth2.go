@@ -68,7 +68,6 @@ type RegistrationFlow struct {
 	RequestURL string    `json:"request_url"`
 	ExpiresAt  time.Time `json:"expires_at"`
 	IssuedAt   time.Time `json:"issued_at"`
-	CSRFToken  string    `json:"-"`
 }
 
 type VerificationFlow struct {
@@ -80,7 +79,6 @@ type VerificationFlow struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 	IssuedAt     time.Time `json:"issued_at"`
 	SentAt       time.Time `json:"sent_at"`
-	CSRFToken    string    `json:"-"`
 }
 
 type AuthorizationCode struct {
@@ -479,12 +477,6 @@ const (
 	IdentityStateInactive IdentityState = "inactive"
 )
 
-type VerifiableAddressType string
-
-const (
-	VerifiableAddressTypeEmail VerifiableAddressType = "email"
-)
-
 type VerifiableAddressStatus string
 
 const (
@@ -532,7 +524,6 @@ func (s *Server) HandleNewRegistrationFlow(ctx context.Context, w http.ResponseW
 		RequestURL: r.URL.String(),
 		ExpiresAt:  iat.Add(30 * time.Minute),
 		IssuedAt:   iat,
-		CSRFToken:  ksuid.New().String(),
 	}
 
 	if err := s.Store.CreateRegistrationFlow(ctx, flow); err != nil {
@@ -563,10 +554,6 @@ func (s *Server) HandleSubmitRegistrationFlow(ctx context.Context, w http.Respon
 	if time.Now().After(flow.ExpiresAt) { // Flow expired, redirect to registration page.
 		http.Redirect(w, r, s.RegistrationURL.String(), http.StatusFound)
 		return nil
-	}
-
-	if flow.CSRFToken != r.PostFormValue("csrf_token") {
-		return errors.New("csrf token is invalid")
 	}
 
 	email := r.PostFormValue("email")
@@ -640,7 +627,6 @@ func (s *Server) HandleNewVerificationFlow(addressID string, ctx context.Context
 		ExpiresAt:    iat.Add(10 * time.Minute),
 		IssuedAt:     iat,
 		SentAt:       iat,
-		CSRFToken:    ksuid.New().String(),
 	}
 
 	var code [4]byte
@@ -680,10 +666,6 @@ func (s *Server) HandleSubmitVerificationFlow(ctx context.Context, w http.Respon
 		return err
 	}
 
-	if flow.CSRFToken != r.PostFormValue("csrf_token") {
-		return errors.New("csrf token is invalid")
-	}
-
 	address, err := s.Store.GetVerifiableAddress(ctx, flow.AddressID)
 	if err != nil {
 		return err
@@ -712,6 +694,8 @@ func (s *Server) HandleSubmitVerificationFlow(ctx context.Context, w http.Respon
 			if err := s.Store.UpdateVerificationFlow(ctx, flow); err != nil {
 				return err
 			}
+
+			return errors.New("verification code is incorrect")
 		}
 	} else if r.PostFormValue("refresh") != "" {
 		if duration := now.Sub(flow.SentAt); duration < 1*time.Minute { // Verification code may only be sent once every minute.
@@ -731,18 +715,17 @@ func (s *Server) HandleSubmitVerificationFlow(ctx context.Context, w http.Respon
 			flow.Code = string(code[:])
 			flow.IssuedAt = now.UTC()
 			flow.ExpiresAt = now.Add(10 * time.Minute)
+
+			fmt.Println("issuing and resending a new verification code:", flow.Code)
 		}
 
 		flow.SentAt = now
 
+		// TODO(kenta): send verification code
+
 		if err := s.Store.UpdateVerificationFlow(ctx, flow); err != nil {
 			return err
 		}
-
-		fmt.Println("issuing and resending a new verification code:", flow.Code)
-
-		// TODO(kenta): send verification code
-
 	} else {
 		return errors.New("unknown action")
 	}

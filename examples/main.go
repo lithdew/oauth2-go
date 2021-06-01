@@ -1,11 +1,15 @@
 package main
 
 import (
+	"github.com/go-chi/chi"
+	"github.com/justinas/nosurf"
 	"github.com/lithdew/oauth2-go"
 	"golang.org/x/crypto/bcrypt"
 	"html/template"
 	"net/http"
 	"net/url"
+	"strconv"
+	"time"
 )
 
 func check(err error) {
@@ -20,7 +24,7 @@ func pluck(a interface{}, err error) interface{} { check(err); return a }
 
 var loginTemplate = template.Must(template.New("login").Parse(`
 <form method="post" action="/login">
-	<input type="hidden" name="challenge" value="{{ .Challenge }}" />
+	<input type="hidden" name="csrf_token" value="{{ .csrf_token }}" />
 	<input type="email" id="email" name="email" placeholder="hello@example.com" />
 	<input type="password" id="password" name="password" />
 
@@ -33,7 +37,7 @@ var loginTemplate = template.Must(template.New("login").Parse(`
 
 var registerTemplate = template.Must(template.New("register").Parse(`
 <form method="post" action="/register/submit">
-	<input type="hidden" name="csrf_token" value="{{ .CSRFToken }}" />
+	<input type="hidden" name="csrf_token" value="{{ .csrf_token }}" />
 	<input type="email" id="email" name="email" placeholder="hello@example.com" />
 	<input type="password" id="password" name="password" />
 
@@ -42,9 +46,9 @@ var registerTemplate = template.Must(template.New("register").Parse(`
 ))
 
 var verifyTemplate = template.Must(template.New("verify").Parse(`
-You have {{.AttemptsLeft}} attempt(s) left. A new code will be generated if all attempts failed.
+You have {{ .attempts_left }} attempt(s) left. A new code will be generated if all attempts failed.
 <form method="post" action="/verify/submit">
-	<input type="hidden" name="csrf_token" value="{{ .CSRFToken }}" />
+	<input type="hidden" name="csrf_token" value="{{ .csrf_token }}" />
 	<input type="text" id="code" name="code" placeholder="0000" />
 	<input type="submit" id="submit" name="submit" value="Verify" />
 	<input type="submit" id="refresh" name="refresh" value="Resend Verification Code" />
@@ -79,35 +83,57 @@ func main() {
 		},
 	}
 
-	http.HandleFunc("/oauth2/callback", func(w http.ResponseWriter, r *http.Request) { check(r.Write(w)) })
+	r := chi.NewRouter()
 
-	http.HandleFunc("/oauth2/auth", func(w http.ResponseWriter, r *http.Request) {
+	csrf := func(h http.Handler) http.Handler {
+		surfing := nosurf.New(h)
+
+		surfing.SetBaseCookie(http.Cookie{
+			Path:     "/",
+			HttpOnly: true,
+			MaxAge:   nosurf.MaxAge,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+		})
+		return surfing
+	}
+
+	r.Get("/oauth2/callback", func(w http.ResponseWriter, r *http.Request) { check(r.Write(w)) })
+
+	r.Get("/oauth2/auth", func(w http.ResponseWriter, r *http.Request) {
 		if err := server.HandleAuthorizationRequest(r.Context(), w, r); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	})
 
-	http.HandleFunc("/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
+	r.Post("/oauth2/auth", func(w http.ResponseWriter, r *http.Request) {
+		if err := server.HandleAuthorizationRequest(r.Context(), w, r); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	})
+
+	r.Post("/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
 		if err := server.HandleAccessTokenRequest(r.Context(), w, r); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	})
 
-	http.HandleFunc("/oauth2/login", func(w http.ResponseWriter, r *http.Request) {
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) { check2(w.Write([]byte("Hello world."))) })
+
+	r.Get("/login", func(w http.ResponseWriter, r *http.Request) {
+		params := map[string]string{"csrf_token": nosurf.Token(r)}
+
 		w.Header().Set("Content-Type", "text/html")
-		if err := loginTemplate.Execute(w, struct{ Challenge string }{Challenge: "todo"}); err != nil {
+		if err := loginTemplate.Execute(w, params); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	})
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		check2(w.Write([]byte("Hello world.")))
-	})
-
-	http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
+	r.With(csrf).Get("/register", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("flow")
 		if id == "" {
 			if err := server.HandleNewRegistrationFlow(r.Context(), w, r); err != nil {
@@ -123,21 +149,36 @@ func main() {
 			return
 		}
 
+		if time.Now().After(flow.ExpiresAt) {
+			http.Redirect(w, r, server.RegistrationURL.String(), http.StatusFound)
+			return
+		}
+
+		params := map[string]string{"csrf_token": nosurf.Token(r)}
+
 		w.Header().Set("Content-Type", "text/html")
-		if err := registerTemplate.Execute(w, flow); err != nil {
+		if err := registerTemplate.Execute(w, params); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	})
 
-	http.HandleFunc("/register/submit", func(w http.ResponseWriter, r *http.Request) {
+	r.With(csrf).Post("/register/submit", func(w http.ResponseWriter, r *http.Request) {
 		if err := server.HandleSubmitRegistrationFlow(r.Context(), w, r); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			referrer, parseErr := url.Parse(r.Referer())
+			if parseErr != nil {
+				http.Error(w, parseErr.Error(), http.StatusBadRequest)
+				return
+			}
+			query := referrer.Query()
+			query.Set("error", err.Error())
+			referrer.RawQuery = query.Encode()
+			http.Redirect(w, r, referrer.String(), http.StatusFound)
 			return
 		}
 	})
 
-	http.HandleFunc("/verify", func(w http.ResponseWriter, r *http.Request) {
+	r.With(csrf).Get("/verify", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("flow")
 		if id == "" {
 			http.Error(w, "verification flow id must be specified", http.StatusBadRequest)
@@ -161,19 +202,32 @@ func main() {
 			return
 		}
 
+		params := map[string]string{
+			"csrf_token":    nosurf.Token(r),
+			"attempts_left": strconv.FormatUint(uint64(flow.AttemptsLeft), 10),
+		}
+
 		w.Header().Set("Content-Type", "text/html")
-		if err := verifyTemplate.Execute(w, flow); err != nil {
+		if err := verifyTemplate.Execute(w, params); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	})
 
-	http.HandleFunc("/verify/submit", func(w http.ResponseWriter, r *http.Request) {
+	r.With(csrf).Post("/verify/submit", func(w http.ResponseWriter, r *http.Request) {
 		if err := server.HandleSubmitVerificationFlow(r.Context(), w, r); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			referrer, parseErr := url.Parse(r.Referer())
+			if parseErr != nil {
+				http.Error(w, parseErr.Error(), http.StatusBadRequest)
+				return
+			}
+			query := referrer.Query()
+			query.Set("error", err.Error())
+			referrer.RawQuery = query.Encode()
+			http.Redirect(w, r, referrer.String(), http.StatusFound)
 			return
 		}
 	})
 
-	check(http.ListenAndServe(":8080", http.DefaultServeMux))
+	check(http.ListenAndServe(":8080", r))
 }
