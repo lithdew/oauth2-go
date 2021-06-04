@@ -325,6 +325,18 @@ func (s *Store) GetIdentity(_ context.Context, identityID string) (Identity, err
 	return identity, nil
 }
 
+func (s *Store) UpdateIdentity(_ context.Context, identity Identity) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, exists := s.Identities[identity.ID]
+	if !exists {
+		return errors.New("identity not found")
+	}
+	s.Identities[identity.ID] = identity
+	return nil
+}
+
 type Server struct {
 	LoginURL        url.URL
 	RegistrationURL url.URL
@@ -577,6 +589,9 @@ type Identity struct {
 	Credentials map[CredentialsType]Credentials `json:"credentials"`
 	Traits      json.RawMessage                 `json:"traits"`
 	State       IdentityState                   `json:"state"`
+
+	LoginAttemptsLeft      uint      `json:"login_attempts_left"`
+	LastFailedLoginAttempt time.Time `json:"last_failed_login_attempt"`
 }
 
 type VerifiableAddress struct {
@@ -636,7 +651,20 @@ func (s *Server) HandleSubmitLoginFlow(ctx context.Context, w http.ResponseWrite
 		return fmt.Errorf("malformed identity password credentials: %w", err)
 	}
 
+	if identity.LoginAttemptsLeft == 0 {
+		if time.Now().Sub(identity.LastFailedLoginAttempt) < 24*time.Hour {
+			return errors.New("your account has been locked for safety, please wait 24 hours or reset your password")
+		}
+
+		identity.LoginAttemptsLeft = 10
+	}
+
 	if err := bcrypt.CompareHashAndPassword([]byte(details.Hash), append([]byte(password), []byte(details.Salt)...)); err != nil {
+		identity.LoginAttemptsLeft -= 1
+		identity.LastFailedLoginAttempt = time.Now()
+		if err := s.Store.UpdateIdentity(ctx, identity); err != nil {
+			return err
+		}
 		return fmt.Errorf("incorrect password: %w", err)
 	}
 
@@ -647,10 +675,25 @@ func (s *Server) HandleSubmitLoginFlow(ctx context.Context, w http.ResponseWrite
 
 	redirectTo, err := url.Parse(flow.RequestURL)
 	if err != nil {
+		identity.LoginAttemptsLeft -= 1
+		identity.LastFailedLoginAttempt = time.Now()
+		if err := s.Store.UpdateIdentity(ctx, identity); err != nil {
+			return err
+		}
 		return fmt.Errorf("bad redirect url: %w", err)
 	}
 
 	if err := s.Store.UpdateLoginFlow(ctx, flow); err != nil {
+		identity.LoginAttemptsLeft -= 1
+		identity.LastFailedLoginAttempt = time.Now()
+		if err := s.Store.UpdateIdentity(ctx, identity); err != nil {
+			return err
+		}
+		return err
+	}
+
+	identity.LoginAttemptsLeft = 10
+	if err := s.Store.UpdateIdentity(ctx, identity); err != nil {
 		return err
 	}
 
@@ -736,6 +779,8 @@ func (s *Server) HandleSubmitRegistrationFlow(ctx context.Context, w http.Respon
 		Credentials: map[CredentialsType]Credentials{
 			CredentialsTypePassword: credentials,
 		},
+		LoginAttemptsLeft:      10,
+		LastFailedLoginAttempt: time.Time{},
 	}
 
 	address := VerifiableAddress{
