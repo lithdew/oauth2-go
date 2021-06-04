@@ -23,6 +23,8 @@ func check2(_ interface{}, err error) { check(err) }
 func pluck(a interface{}, err error) interface{} { check(err); return a }
 
 var loginTemplate = template.Must(template.New("login").Parse(`
+<h2>Hello!</h2>
+Welcome back. Log in to continue.
 <form method="post" action="/login/submit">
 	<input type="hidden" name="csrf_token" value="{{ .csrf_token }}" />
 	<input type="email" id="email" name="email" placeholder="hello@example.com" />
@@ -32,10 +34,14 @@ var loginTemplate = template.Must(template.New("login").Parse(`
 	<label for="remember">Remember me</label>
 
 	<input type="submit" id="submit" name="submit" value="Login" />
-</form>`,
+</form>
+<a href="/recovery">Forget password?</a>
+<a href="/register">Create your account</a>`,
 ))
 
 var registerTemplate = template.Must(template.New("register").Parse(`
+<h2>Hello!</h2>
+Create your account for free today.
 <form method="post" action="/register/submit">
 	<input type="hidden" name="csrf_token" value="{{ .csrf_token }}" />
 	<input type="email" id="email" name="email" placeholder="hello@example.com" />
@@ -46,6 +52,7 @@ var registerTemplate = template.Must(template.New("register").Parse(`
 ))
 
 var verifyTemplate = template.Must(template.New("verify").Parse(`
+<h2>Complete your account setup</h2>
 You have {{ .attempts_left }} attempt(s) left. A new code will be generated if all attempts failed.
 <form method="post" action="/verify/submit">
 	<input type="hidden" name="csrf_token" value="{{ .csrf_token }}" />
@@ -55,9 +62,22 @@ You have {{ .attempts_left }} attempt(s) left. A new code will be generated if a
 </form>
 `))
 
+var recoveryInitTemplate = template.Must(template.New("recovery_init").Parse(`
+<h2>Forgot your password?</h2>
+Don't worry. Enter your registered email and we'll send you instructions to reset your password.
+<form method="post" action="/recovery/submit">
+	<input type="hidden" name="csrf_token" value="{{ .csrf_token }}" />
+	<input type="email" id="email" name="email" placeholder="hello@example.com" />
+	<input type="submit" id="submit" name="submit" value="Reset password" />
+</form>
+Here by mistake? <a href="/login">Back to login</a>
+`))
+
 func main() {
 	server := oauth2.Server{
+		DefaultClientID: "example",
 		LoginURL:        *pluck(url.Parse("http://localhost:8080/login")).(*url.URL),
+		AuthorizeURL:    *pluck(url.Parse("http://localhost:8080/oauth2/auth")).(*url.URL),
 		RegistrationURL: *pluck(url.Parse("http://localhost:8080/register")).(*url.URL),
 		VerificationURL: *pluck(url.Parse("http://localhost:8080/verify")).(*url.URL),
 		Store: oauth2.Store{
@@ -126,8 +146,39 @@ func main() {
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) { check2(w.Write([]byte("Hello world."))) })
 
 	r.With(csrf).Get("/login", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("flow") == "" {
-			http.Redirect(w, r, "/", http.StatusFound)
+		ctx := r.Context()
+
+		id := r.URL.Query().Get("flow")
+		if id == "" {
+			client, ok := server.Store.GetClientByID(ctx, server.DefaultClientID)
+			if !ok {
+				http.Redirect(w, r, "/", http.StatusFound)
+				return
+			}
+			redirectTo := server.AuthorizeURL
+			query := redirectTo.Query()
+			query.Set("response_type", "code")
+			query.Set("redirect_uri", client.GetRedirectURI())
+			query.Set("client_id", server.DefaultClientID)
+			redirectTo.RawQuery = query.Encode()
+			http.Redirect(w, r, redirectTo.String(), http.StatusFound)
+			return
+		}
+
+		_, err := server.Store.GetLoginFlow(r.Context(), id)
+		if err != nil {
+			client, ok := server.Store.GetClientByID(ctx, server.DefaultClientID)
+			if !ok {
+				http.Redirect(w, r, "/", http.StatusFound)
+				return
+			}
+			redirectTo := server.AuthorizeURL
+			query := redirectTo.Query()
+			query.Set("response_type", "code")
+			query.Set("redirect_uri", client.GetRedirectURI())
+			query.Set("client_id", server.DefaultClientID)
+			redirectTo.RawQuery = query.Encode()
+			http.Redirect(w, r, redirectTo.String(), http.StatusFound)
 			return
 		}
 
@@ -247,6 +298,16 @@ func main() {
 			query.Set("error", err.Error())
 			referrer.RawQuery = query.Encode()
 			http.Redirect(w, r, referrer.String(), http.StatusFound)
+			return
+		}
+	})
+
+	r.With(csrf).Get("/recovery", func(w http.ResponseWriter, r *http.Request) {
+		params := map[string]string{"csrf_token": nosurf.Token(r)}
+
+		w.Header().Set("Content-Type", "text/html")
+		if err := recoveryInitTemplate.Execute(w, params); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	})

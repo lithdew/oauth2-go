@@ -117,6 +117,13 @@ type Client struct {
 	AllowedRedirectURIs map[string]struct{}
 }
 
+func (c Client) GetRedirectURI() string {
+	for redirectURI := range c.AllowedRedirectURIs {
+		return redirectURI
+	}
+	return ""
+}
+
 type Store struct {
 	mu      sync.Mutex
 	Clients map[string]Client
@@ -338,7 +345,9 @@ func (s *Store) UpdateIdentity(_ context.Context, identity Identity) error {
 }
 
 type Server struct {
+	DefaultClientID string
 	LoginURL        url.URL
+	AuthorizeURL    url.URL
 	RegistrationURL url.URL
 	VerificationURL url.URL
 	Store           Store
@@ -370,11 +379,7 @@ func (s *Server) HandleAuthorizationRequest(ctx context.Context, w http.Response
 		return err
 	}
 
-	state := query.Get("state") // REQUIRED.
-	if state == "" {
-		return errors.New("state must be provided")
-	}
-
+	state := query.Get("state") // OPTIONAL.
 	nonce := query.Get("nonce") // OPTIONAL.
 
 	codeChallenge := query.Get("code_challenge")
